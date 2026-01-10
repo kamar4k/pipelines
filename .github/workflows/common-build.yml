@@ -1,0 +1,162 @@
+name: Common Build Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Ветка для сборки'
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+    steps:
+      # Шаг 1: Получение кода
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      # Установка yq для парсинга YAML
+      - name: Setup yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/download/v4.35.1/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+
+      # Получение конфигурации из файла
+      - name: Load build configuration
+        id: config
+        run: |
+          CONFIG_FILE=".github/workflows/config/build-config.yml"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "Error: Configuration file $CONFIG_FILE not found!"
+            exit 1
+          fi
+          
+          # Парсинг YAML (требуется yq)
+          REGISTRY=$(yq eval '.registry // "ghcr.io"' $CONFIG_FILE)
+          REGISTRY_OWNER=$(yq eval '.registry_owner' $CONFIG_FILE)
+          JAVA_VERSION=$(yq eval '.java_version // "21"' $CONFIG_FILE)
+          
+          echo "REGISTRY=$REGISTRY" >> $GITHUB_ENV
+          echo "REGISTRY_OWNER=$REGISTRY_OWNER" >> $GITHUB_ENV
+          echo "JAVA_VERSION=$JAVA_VERSION" >> $GITHUB_ENV
+          echo "config_loaded=true" >> $GITHUB_ENV
+        env:
+          YQ_VERSION: v4.35.1
+
+      # Получение версии и наименования артефакта
+      - name: Read version and artifact name
+        id: read-artifact-into
+        run: |
+          if [ -f "gradle.properties" ]; then
+            VERSION=$(grep -oP 'version\s*=\s*\K[^\s]+' gradle.properties | head -1)
+          else
+            echo "gradle.properties not found in project"
+            exit 1
+          fi
+
+          if [ -f "settings.gradle.kts" ]; then
+            ARTIFACT_NAME=$(sed -n "s/.*rootProject\.name\s*=\s*[\"']\([^\"']*\)[\"'].*/\1/p" settings.gradle.kts)
+          else
+            echo "settings.gradle.kts not found in project"
+            exit 1
+          fi
+
+          # Удаляем возможные кавычки
+          VERSION=$(echo $VERSION | tr -d '"' | tr -d "'")
+          ARTIFACT_NAME=$(echo $ARTIFACT_NAME | tr -d '"' | tr -d "'")
+          FULL_VERSION="${VERSION}-${{ github.run_number }}"
+          echo "Artifact name = $ARTIFACT_NAME version=$FULL_VERSION"
+          
+          echo "version=$FULL_VERSION" >> $GITHUB_OUTPUT
+          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+          echo "VERSION=$FULL_VERSION" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+
+      # Установка JDK
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      # Настройка Gradle
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      # Сборка проекта
+      - name: Build with Gradle
+        run: ./gradlew build  # Запуск стандартной задачи сборки Gradle
+
+      # Запуск тестов
+      - name: Run tests
+        run: ./gradlew test  # Запуск unit и integration тестов
+        # Результаты тестов можно посмотреть в UI GitHub Actions
+        # При падении тестов workflow завершится с ошибкой
+
+      # Создание "жирного" JAR-файла
+      - name: Build shadow JAR
+        run: ./gradlew shadowJar -Pversion=${{ env.VERSION }} # Создание JAR со всеми зависимостями внутри
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}  # Передаем номер сборки в Gradle
+
+      # Сохранение JAR-файла как артефакт сборки
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-jar  # Имя артефакта для скачивания из UI
+          path: build/libs/*.jar  # Путь к сгенерированным JAR-файлам
+          retention-days: 30  # Автоматическое удаление через 30 дней
+
+      # Авторизация в registry
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Сборка и публикация Docker образа
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.REGISTRY_OWNER }}/${{ env.ARTIFACT_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.REGISTRY_OWNER }}/${{ env.ARTIFACT_NAME }}:latest
+          labels: |
+            version=${{ env.VERSION }}
+            build-date=${{ github.run_id }}
+
+      # Создание релиза
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          files: |
+            build/libs/*.jar
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
