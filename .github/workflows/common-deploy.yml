@@ -33,7 +33,16 @@ jobs:
     environment: ${{ inputs.environment }}
 
     steps:
-      # Шаг 1: Checkout конфигурационного репозитория
+      - name: Check application-repository
+        uses: action/checkout@v4
+
+      # Читаем конфигурацию из файла
+      - name: Read service configuration
+        id: read_config
+        run: |
+          SERVICE_NAME=$(yq eval '.service' .github/workflow/config/deploy-config.yml)
+          echo "SERVICE_NAME=$SERVICE_NAME" >> $GITHUB_OUTPUT
+      # Checkout конфигурационного репозитория
       - name: Checkout config repository
         uses: actions/checkout@v4
         with:
@@ -41,7 +50,7 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}  # Personal Access Token с доступом к config repo
           path: config-repo
 
-      # Шаг 2: Загружаем конфигурацию развертывания
+      # Загружаем конфигурацию развертывания
       - name: Load deployment configuration
         id: load_deploy_config
         run: |
@@ -83,7 +92,7 @@ jobs:
           # Переменные для envsubst
           secrets: ${{ toJson(secrets) }}
 
-      # Шаг 3: Загружаем переменные окружения приложения
+      # Загружаем переменные окружения приложения
       - name: Load environment variables
         id: load_env_vars
         run: |
@@ -114,7 +123,7 @@ jobs:
         env:
           secrets: ${{ toJson(secrets) }}
 
-      # Шаг 4: Настройка SSH для подключения к целевому серверу
+      # Настройка SSH для подключения к целевому серверу
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
@@ -122,7 +131,7 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ steps.load_deploy_config.outputs.SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      # Шаг 5: Деплой на удаленный сервер
+      # Деплой на удаленный сервер
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -160,7 +169,7 @@ jobs:
             # Очистка старых образов
             docker image prune -f
 
-      # Шаг 6: Проверка успешности деплоя
+      # Проверка успешности деплоя
       - name: Verify deployment
         uses: appleboy/ssh-action@v1.0.0
         with:
