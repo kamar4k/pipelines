@@ -62,15 +62,79 @@ jobs:
             exit 1
           fi
           
-          # Парсим YAML и экспортируем переменные
-          DOCKER_REGISTRY=$(yq eval '.DOCKER_REGISTRY // ""' "$DEPLOY_FILE")
-          REGISTRY_OWNER=$(yq eval '.REGISTRY_OWNER // ""' "$DEPLOY_FILE")
-          # Для секретов используем envsubst для подстановки
-          export secrets="${{ toJson(secrets) }}"
-          SSH_PRIVATE_KEY=$(yq eval '.SSH_PRIVATE_KEY // ""' "$DEPLOY_FILE" | envsubst)
-          SSH_HOST=$(yq eval '.SSH_HOST // ""' "$DEPLOY_FILE" | envsubst)
-          SSH_USERNAME=$(yq eval '.SSH_USERNAME // ""' "$DEPLOY_FILE" | envsubst)
-          REGISTRY_TOKEN=$(yq eval '.REGISTRY_TOKEN // ""' "$DEPLOY_FILE" | envsubst)
+          # Устанавливаем yq если нет
+          if ! command -v yq &> /dev/null; then
+            echo "Installing yq..."
+            sudo wget -q https://github.com/mikefarah/yq/releases/download/v4.35.1/yq_linux_amd64 -O /usr/bin/yq
+            sudo chmod +x /usr/bin/yq
+          fi
+          
+          # Функция для замены шаблонов GitHub Actions
+          replace_github_templates() {
+            local content="$1"
+          
+            # Заменяем ${{ secrets.XXX }} на значения из переменных окружения
+            # GitHub Secrets автоматически добавляются как переменные окружения
+            while [[ "$content" =~ (\$\{\{[[:space:]]*secrets\.([^}]+)[[:space:]]*\}\}) ]]; do
+              full_match="${BASH_REMATCH[1]}"
+              secret_name="${BASH_REMATCH[2]}"
+          
+              # Получаем значение секрета из переменной окружения
+              secret_value="${!secret_name}"
+          
+              if [ -z "$secret_value" ]; then
+                echo "Warning: Secret '$secret_name' not found" >&2
+                # Если секрет не найден, оставляем как есть
+                break
+              fi
+          
+              # Экранируем специальные символы для sed
+              escaped_value=$(echo "$secret_value" | sed 's/[\/&]/\\&/g')
+              escaped_match=$(echo "$full_match" | sed 's/[\/&]/\\&/g')
+          
+              content=$(echo "$content" | sed "s/$escaped_match/$escaped_value/g")
+            done
+          
+            echo "$content"
+          }
+          
+          # Читаем YAML файл
+          yaml_content=$(cat "$DEPLOY_FILE")
+          
+          # Обрабатываем шаблоны GitHub
+          processed_yaml=$(replace_github_templates "$yaml_content")
+          
+          # Сохраняем обработанный YAML во временный файл
+          echo "$processed_yaml" > /tmp/deploy_processed.yml
+          
+          # Теперь парсим обработанный YAML
+          DOCKER_REGISTRY=$(yq eval '.DOCKER_REGISTRY // "ghcr.io"' /tmp/deploy_processed.yml)
+          REGISTRY_OWNER=$(yq eval '.REGISTRY_OWNER // ""' /tmp/deploy_processed.yml)
+          SSH_HOST=$(yq eval '.SSH_HOST // ""' /tmp/deploy_processed.yml)
+          SSH_USERNAME=$(yq eval '.SSH_USERNAME // ""' /tmp/deploy_processed.yml)
+          SSH_PRIVATE_KEY=$(yq eval '.SSH_PRIVATE_KEY // ""' /tmp/deploy_processed.yml)
+          REGISTRY_TOKEN=$(yq eval '.REGISTRY_TOKEN // ""' /tmp/deploy_processed.yml)
+          
+          # Проверяем обязательные переменные
+          if [ -z "$SSH_HOST" ]; then
+            echo "Error: SSH_HOST is not defined in deploy.yml"
+            exit 1
+          fi
+          
+          if [ -z "$SSH_USERNAME" ]; then
+            echo "Error: SSH_USERNAME is not defined in deploy.yml"
+            exit 1
+          fi
+          
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Error: SSH_PRIVATE_KEY is not defined in deploy.yml"
+            exit 1
+          fi
+          
+          echo "SSH_HOST: ${SSH_HOST:0:10}..."  # Логируем частично для безопасности
+          echo "SSH_USERNAME: $SSH_USERNAME"
+          echo "DOCKER_REGISTRY: $DOCKER_REGISTRY"
+          
           # Сохраняем в outputs
           echo "SSH_HOST=$SSH_HOST" >> $GITHUB_OUTPUT
           echo "SSH_USERNAME=$SSH_USERNAME" >> $GITHUB_OUTPUT
@@ -78,10 +142,9 @@ jobs:
           echo "REGISTRY_OWNER=$REGISTRY_OWNER" >> $GITHUB_OUTPUT
           echo "DOCKER_REGISTRY=$DOCKER_REGISTRY" >> $GITHUB_OUTPUT
           
-          # Сохраняем приватный ключ во временный файл
+          # Сохраняем приватный ключ
           echo "$SSH_PRIVATE_KEY" > /tmp/ssh_private_key
           chmod 600 /tmp/ssh_private_key
-
         env:
           # Переменные для envsubst
           secrets: ${{ toJson(secrets) }}
