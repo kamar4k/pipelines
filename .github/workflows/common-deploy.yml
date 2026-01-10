@@ -33,17 +33,6 @@ jobs:
     environment: ${{ inputs.environment }}
 
     steps:
-      - name: Check application-repository
-        uses: action/checkout@v4
-        with:
-          ref:
-
-      # Читаем конфигурацию из файла
-      - name: Read service configuration
-        id: read_config
-        run: |
-          SERVICE_NAME=$(yq eval '.service' .github/workflow/config/deploy-config.yml)
-          echo "SERVICE_NAME=$SERVICE_NAME" >> $GITHUB_OUTPUT
       # Checkout конфигурационного репозитория
       - name: Checkout config repository
         uses: actions/checkout@v4
