@@ -1,0 +1,187 @@
+name: Common Deploy Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version for deploy (format: build number, e.g.: 1.0.0-1)'
+        required: true
+        type: string
+        default: '1.0.0-1'
+      environment:
+        description: 'Environment for deployment'
+        required: true
+        type: string
+        default: 'production'
+      service:
+        description: 'Service name'
+        required: true
+        type: string
+      config_repo:
+        description: 'Configuration repository'
+        required: true
+        type: string
+      config_path:
+        description: 'Path to configuration files in config repo'
+        required: true
+        type: string
+        default: ''
+      docker_registry:
+        description: 'Docker registry URL'
+        required: true
+        type: string
+      registry_owner:
+        description: 'Registry owner/organization'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      # Шаг 1: Checkout конфигурационного репозитория
+      - name: Checkout config repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.config_repo }}
+          token: ${{ secrets.PAT_TOKEN }}  # Personal Access Token с доступом к config repo
+          path: config-repo
+
+      # Шаг 2: Загружаем конфигурацию развертывания
+      - name: Load deployment configuration
+        id: load_deploy_config
+        run: |
+          CONFIG_PATH="${{ inputs.config_path }}"
+          if [ -n "$CONFIG_PATH" ] && [ "$CONFIG_PATH" != "/" ]; then
+            DEPLOY_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/deploy.yml"
+          else
+            DEPLOY_FILE="config-repo/${{ inputs.environment }}/deploy.yml"
+          fi
+          
+          echo "Looking for deploy config at: $DEPLOY_FILE"
+          
+          if [ ! -f "$DEPLOY_FILE" ]; then
+            echo "Error: Deploy config file not found at $DEPLOY_FILE"
+            exit 1
+          fi
+          
+          # Парсим YAML и экспортируем переменные
+          # Для секретов используем envsubst для подстановки
+          export secrets="${{ toJson(secrets) }}"
+          SSH_PRIVATE_KEY=$(yq eval '.SSH_PRIVATE_KEY // ""' "$DEPLOY_FILE" | envsubst)
+          SSH_HOST=$(yq eval '.SSH_HOST // ""' "$DEPLOY_FILE" | envsubst)
+          SSH_USERNAME=$(yq eval '.SSH_USERNAME // ""' "$DEPLOY_FILE" | envsubst)
+          REGISTRY_TOKEN=$(yq eval '.REGISTRY_TOKEN // ""' "$DEPLOY_FILE" | envsubst)
+          # Сохраняем в outputs
+          echo "SSH_HOST=$SSH_HOST" >> $GITHUB_OUTPUT
+          echo "SSH_USERNAME=$SSH_USERNAME" >> $GITHUB_OUTPUT
+          echo "REGISTRY_TOKEN=$REGISTRY_TOKEN" >> $GITHUB_OUTPUT
+          
+          # Сохраняем приватный ключ во временный файл
+          echo "$SSH_PRIVATE_KEY" > /tmp/ssh_private_key
+          chmod 600 /tmp/ssh_private_key
+
+        env:
+          # Переменные для envsubst
+          secrets: ${{ toJson(secrets) }}
+
+      # Шаг 3: Загружаем переменные окружения приложения
+      - name: Load environment variables
+        id: load_env_vars
+        run: |
+          CONFIG_PATH="${{ inputs.config_path }}"
+          if [ -n "$CONFIG_PATH" ] && [ "$CONFIG_PATH" != "/" ]; then
+            ENV_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
+          else
+            ENV_FILE="config-repo/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
+          fi
+          
+          echo "Looking for env file at: $ENV_FILE"
+          
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "Warning: Environment file not found at $ENV_FILE"
+            echo "ENV_CONTENT=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Конвертируем YAML в формат ключ=значение с обработкой секретов
+          ENV_CONTENT=$(yq eval 'to_entries | .[] | .key + "=" + .value' "$ENV_FILE" | envsubst)
+          
+          # Сохраняем в файл для использования в дальнейшем
+          echo "$ENV_CONTENT" > /tmp/app_env_vars
+          echo "ENV_CONTENT<<EOF" >> $GITHUB_OUTPUT
+          echo "$ENV_CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+        env:
+          secrets: ${{ toJson(secrets) }}
+
+      # Шаг 4: Настройка SSH для подключения к целевому серверу
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          cp /tmp/ssh_private_key ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ steps.load_deploy_config.outputs.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      # Шаг 5: Деплой на удаленный сервер
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ steps.load_deploy_config.outputs.SSH_HOST }}
+          username: ${{ steps.load_deploy_config.outputs.SSH_USERNAME }}
+          key_path: /tmp/ssh_private_key
+          script: |
+            # Авторизация в Docker Registry
+            echo "${{ steps.load_deploy_config.outputs.REGISTRY_TOKEN }}" | docker login ${{ inputs.docker_registry }} -u ${{ github.actor }} --password-stdin
+            
+            # Останавливаем и удаляем старый контейнер
+            docker stop ${{ inputs.service }} || true
+            docker rm ${{ inputs.service }} || true
+            
+            # Создаем директории
+            mkdir -p /opt/${{ inputs.service }}/config
+            mkdir -p /opt/${{ inputs.service }}/logs
+            
+            # Создаем файл с переменными окружения
+            cat > /opt/${{ inputs.service }}/config/.env << 'EOF'
+            ${{ steps.load_env_vars.outputs.ENV_CONTENT }}
+            ENVIRONMENT=${{ inputs.environment }}
+            VERSION=${{ inputs.version }}
+            SERVICE=${{ inputs.service }}
+            EOF
+            
+            # Запускаем новый контейнер
+            docker run -d \
+              --name ${{ inputs.service }} \
+              --restart unless-stopped \
+              --env-file /opt/${{ inputs.service }}/config/.env \
+              -v /opt/${{ inputs.service }}/logs:/app/logs \
+              ${{ inputs.docker_registry }}/${{ inputs.registry_owner }}/${{ inputs.service }}:${{ inputs.version }}
+            
+            # Очистка старых образов
+            docker image prune -f
+
+      # Шаг 6: Проверка успешности деплоя
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ steps.load_deploy_config.outputs.SSH_HOST }}
+          username: ${{ steps.load_deploy_config.outputs.SSH_USERNAME }}
+          key_path: /tmp/ssh_private_key
+          script: |
+            sleep 30
+            
+            echo "=== Docker Container Status ==="
+            docker ps --filter "name=${{ inputs.service }}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            
+            echo "=== Recent Logs ==="
+            docker logs ${{ inputs.service }} --tail 20
+            
+            echo "=== Container Health ==="
+            docker inspect ${{ inputs.service }} --format='{{.State.Health.Status}}' 2>/dev/null || echo "No healthcheck configured"
+            
+            echo "=== Resource Usage ==="
+            docker stats ${{ inputs.service }} --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" || true
