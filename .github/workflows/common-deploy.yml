@@ -3,6 +3,10 @@ name: Common Deploy Pipeline
 on:
   workflow_call:
     inputs:
+      service:
+        description: 'Name of service'
+        required: true
+        type: string
       version:
         description: 'Version for deploy (format: build number, e.g.: 1.0.0-1)'
         required: true
@@ -31,6 +35,8 @@ jobs:
     steps:
       - name: Check application-repository
         uses: action/checkout@v4
+        with:
+          ref:
 
       # Читаем конфигурацию из файла
       - name: Read service configuration
@@ -94,9 +100,9 @@ jobs:
         run: |
           CONFIG_PATH="${{ inputs.config_path }}"
           if [ -n "$CONFIG_PATH" ] && [ "$CONFIG_PATH" != "/" ]; then
-            ENV_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/env/${{ steps.read_config.outputs.SERVICE_NAME }}.yml"
+            ENV_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
           else
-            ENV_FILE="config-repo/${{ inputs.environment }}/env/${{ steps.read_config.outputs.SERVICE_NAME }}.yml"
+            ENV_FILE="config-repo/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
           fi
           
           echo "Looking for env file at: $ENV_FILE"
@@ -139,28 +145,28 @@ jobs:
             echo "${{ steps.load_deploy_config.outputs.REGISTRY_TOKEN }}" | docker login ${{ steps.load_deploy_config.outputs.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
             
             # Останавливаем и удаляем старый контейнер
-            docker stop ${{ steps.read_config.outputs.SERVICE_NAME }} || true
-            docker rm ${{ steps.read_config.outputs.SERVICE_NAME }} || true
+            docker stop ${{ inputs.service }} || true
+            docker rm ${{ inputs.service }} || true
             
             # Создаем директории
-            mkdir -p /opt/${{ steps.read_config.outputs.SERVICE_NAME }}/config
-            mkdir -p /opt/${{ steps.read_config.outputs.SERVICE_NAME }}/logs
+            mkdir -p /opt/${{ inputs.service }}/config
+            mkdir -p /opt/${{ inputs.service }}/logs
             
             # Создаем файл с переменными окружения
-            cat > /opt/${{ steps.read_config.outputs.SERVICE_NAME }}/config/.env << 'EOF'
+            cat > /opt/${{ inputs.service }}/config/.env << 'EOF'
             ${{ steps.load_env_vars.outputs.ENV_CONTENT }}
             ENVIRONMENT=${{ inputs.environment }}
             VERSION=${{ inputs.version }}
-            SERVICE=${{ steps.read_config.outputs.SERVICE_NAME }}
+            SERVICE=${{ inputs.service }}
             EOF
             
             # Запускаем новый контейнер
             docker run -d \
-              --name ${{ steps.read_config.outputs.SERVICE_NAME }} \
+              --name ${{ inputs.service }} \
               --restart unless-stopped \
-              --env-file /opt/${{ steps.read_config.outputs.SERVICE_NAME }}/config/.env \
-              -v /opt/${{ steps.read_config.outputs.SERVICE_NAME }}/logs:/app/logs \
-              ${{ steps.load_deploy_config.outputs.DOCKER_REGISTRY }}/${{ steps.load_deploy_config.outputs.REGISTRY_OWNER }}/${{ steps.read_config.outputs.SERVICE_NAME }}:${{ inputs.version }}
+              --env-file /opt/${{ inputs.service }}/config/.env \
+              -v /opt/${{ inputs.service }}/logs:/app/logs \
+              ${{ steps.load_deploy_config.outputs.DOCKER_REGISTRY }}/${{ steps.load_deploy_config.outputs.REGISTRY_OWNER }}/${{ inputs.service }}:${{ inputs.version }}
             
             # Очистка старых образов
             docker image prune -f
@@ -176,13 +182,13 @@ jobs:
             sleep 30
             
             echo "=== Docker Container Status ==="
-            docker ps --filter "name=$${{ steps.read_config.outputs.SERVICE_NAME }}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            docker ps --filter "name=$${{ inputs.service }}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
             
             echo "=== Recent Logs ==="
-            docker logs ${{ steps.read_config.outputs.SERVICE_NAME }} --tail 20
+            docker logs ${{ inputs.service }} --tail 20
             
             echo "=== Container Health ==="
-            docker inspect ${{ steps.read_config.outputs.SERVICE_NAME }} --format='{{.State.Health.Status}}' 2>/dev/null || echo "No healthcheck configured"
+            docker inspect ${{ inputs.service }} --format='{{.State.Health.Status}}' 2>/dev/null || echo "No healthcheck configured"
             
             echo "=== Resource Usage ==="
-            docker stats ${{ steps.read_config.outputs.SERVICE_NAME }} --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" || true
+            docker stats ${{ inputs.service }} --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" || true
