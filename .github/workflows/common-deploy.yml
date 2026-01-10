@@ -26,6 +26,9 @@ on:
         required: true
         type: string
         default: ''
+    secrets:
+      GH_TOKEN:
+        required: true
 
 jobs:
   deploy:
