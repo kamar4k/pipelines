@@ -26,8 +26,7 @@ on:
         required: true
         type: string
         default: ''
-    secrets:
-      inherit
+    secrets: inherit
 
 jobs:
   deploy:
