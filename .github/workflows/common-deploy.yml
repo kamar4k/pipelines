@@ -27,8 +27,7 @@ on:
         type: string
         default: ''
     secrets:
-      GH_TOKEN:
-        required: true
+      inherit: true
 
 jobs:
   deploy:
