@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.config_repo }}
-          token: ${{ secrets.PAT_TOKEN }}  # Personal Access Token с доступом к config repo
+          token: ${{ secrets.GH_TOKEN }}  # Personal Access Token с доступом к config repo
           path: config-repo
 
       # Загружаем конфигурацию развертывания
