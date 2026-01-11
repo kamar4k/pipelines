@@ -38,8 +38,8 @@ jobs:
       - name: Load deployment configuration
         id: load_deploy_config
         run: |
-          # Читаем YAML файл
-          yaml_content=$(cat "${{ inputs.deploy_env }}")
+          # Читаем YAML строку
+          yaml_content="${{ inputs.deploy_env }}"
           
           # Теперь парсим обработанный YAML
           DOCKER_REGISTRY=$(echo "$yaml_content" | yq eval '.DOCKER_REGISTRY')
