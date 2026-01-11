@@ -85,7 +85,7 @@ jobs:
         id: load_env_vars
         run: |
           # Конвертируем YAML в формат ключ=значение с обработкой секретов
-          ENV_CONTENT=$(echo "${{ input.service_env }}" | yq eval 'to_entries | .[] | .key + "=" + .value')
+          ENV_CONTENT=$(echo "${{ inputs.service_env }}" | yq eval 'to_entries | .[] | .key + "=" + .value')
           
           # Сохраняем в файл для использования в дальнейшем
           echo "$ENV_CONTENT" > /tmp/app_env_vars
