@@ -12,105 +12,42 @@ on:
         required: true
         type: string
         default: '1.0.0-1'
-      environment:
-        description: 'Environment for deployment'
+      deploy_env:
+        description: 'Deploy configuration in yml format'
         required: true
         type: string
-        default: 'production'
-      config_repo:
-        description: 'Configuration repository'
+      service_env:
+        description: 'Service environments in yml format'
         required: true
         type: string
-      config_path:
-        description: 'Path to configuration files in config repo'
-        required: true
-        type: string
-        default: ''
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
 
     steps:
-      # Checkout конфигурационного репозитория
-      - name: Checkout config repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.config_repo }}
-          token: ${{ secrets.GH_TOKEN }}  # Personal Access Token с доступом к config repo
-          path: config-repo
-
       # Загружаем конфигурацию развертывания
-      - name: Load deployment configuration
-        id: load_deploy_config
+      - name: install yq if not exists
         run: |
-          CONFIG_PATH="${{ inputs.config_path }}"
-          if [ -n "$CONFIG_PATH" ] && [ "$CONFIG_PATH" != "/" ]; then
-            DEPLOY_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/deploy.yml"
-          else
-            DEPLOY_FILE="config-repo/${{ inputs.environment }}/deploy.yml"
-          fi
-          
-          echo "Looking for deploy config at: $DEPLOY_FILE"
-          
-          if [ ! -f "$DEPLOY_FILE" ]; then
-            echo "Error: Deploy config file not found at $DEPLOY_FILE"
-            exit 1
-          fi
-          
           # Устанавливаем yq если нет
           if ! command -v yq &> /dev/null; then
             echo "Installing yq..."
             sudo wget -q https://github.com/mikefarah/yq/releases/download/v4.35.1/yq_linux_amd64 -O /usr/bin/yq
             sudo chmod +x /usr/bin/yq
           fi
-          
-          # Функция для замены шаблонов GitHub Actions
-          replace_github_templates() {
-            local content="$1"
-          
-            # Заменяем ${{ secrets.XXX }} на значения из переменных окружения
-            # GitHub Secrets автоматически добавляются как переменные окружения
-            while [[ "$content" =~ (\$\{\{[[:space:]]*secrets\.([^}]+)[[:space:]]*\}\}) ]]; do
-              full_match="${BASH_REMATCH[1]}"
-              secret_name="${BASH_REMATCH[2]}"
-          
-              # Получаем значение секрета из переменной окружения
-              secret_value="${!secret_name}"
-          
-              if [ -z "$secret_value" ]; then
-                echo "Warning: Secret '$secret_name' not found" >&2
-                # Если секрет не найден, оставляем как есть
-                break
-              fi
-          
-              # Экранируем специальные символы для sed
-              escaped_value=$(echo "$secret_value" | sed 's/[\/&]/\\&/g')
-              escaped_match=$(echo "$full_match" | sed 's/[\/&]/\\&/g')
-          
-              content=$(echo "$content" | sed "s/$escaped_match/$escaped_value/g")
-            done
-          
-            echo "$content"
-          }
-          
+      - name: Load deployment configuration
+        id: load_deploy_config
+        run: |
           # Читаем YAML файл
-          yaml_content=$(cat "$DEPLOY_FILE")
-          
-          # Обрабатываем шаблоны GitHub
-          processed_yaml=$(replace_github_templates "$yaml_content")
-          
-          # Сохраняем обработанный YAML во временный файл
-          echo "$processed_yaml" > /tmp/deploy_processed.yml
+          yaml_content=$(cat "${{ inputs.deploy_env }}")
           
           # Теперь парсим обработанный YAML
-          DOCKER_REGISTRY=$(yq eval '.DOCKER_REGISTRY // "ghcr.io"' /tmp/deploy_processed.yml)
-          REGISTRY_OWNER=$(yq eval '.REGISTRY_OWNER // ""' /tmp/deploy_processed.yml)
-          SSH_HOST=$(yq eval '.SSH_HOST // ""' /tmp/deploy_processed.yml)
-          SSH_USERNAME=$(yq eval '.SSH_USERNAME // ""' /tmp/deploy_processed.yml)
-          SSH_PRIVATE_KEY=$(yq eval '.SSH_PRIVATE_KEY // ""' /tmp/deploy_processed.yml)
-          REGISTRY_TOKEN=$(yq eval '.REGISTRY_TOKEN // ""' /tmp/deploy_processed.yml)
+          DOCKER_REGISTRY=$(echo "$yaml_content" | yq eval '.DOCKER_REGISTRY')
+          REGISTRY_OWNER=$(echo "$yaml_content" | yq eval '.REGISTRY_OWNER')
+          SSH_HOST=$(echo "$yaml_content" | yq eval '.SSH_HOST')
+          SSH_USERNAME=$(echo "$yaml_content" | yq eval '.SSH_USERNAME')
+          SSH_PRIVATE_KEY=$(echo "$yaml_content" | yq eval '.SSH_PRIVATE_KEY')
+          REGISTRY_TOKEN=$(echo "$yaml_content" | yq eval '.REGISTRY_TOKEN')
           
           # Проверяем обязательные переменные
           if [ -z "$SSH_HOST" ]; then
@@ -142,40 +79,19 @@ jobs:
           # Сохраняем приватный ключ
           echo "$SSH_PRIVATE_KEY" > /tmp/ssh_private_key
           chmod 600 /tmp/ssh_private_key
-        env:
-          # Переменные для envsubst
-          secrets: ${{ toJson(secrets) }}
 
       # Загружаем переменные окружения приложения
       - name: Load environment variables
         id: load_env_vars
         run: |
-          CONFIG_PATH="${{ inputs.config_path }}"
-          if [ -n "$CONFIG_PATH" ] && [ "$CONFIG_PATH" != "/" ]; then
-            ENV_FILE="config-repo/$CONFIG_PATH/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
-          else
-            ENV_FILE="config-repo/${{ inputs.environment }}/env/${{ inputs.service }}.yml"
-          fi
-          
-          echo "Looking for env file at: $ENV_FILE"
-          
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "Warning: Environment file not found at $ENV_FILE"
-            echo "ENV_CONTENT=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
           # Конвертируем YAML в формат ключ=значение с обработкой секретов
-          ENV_CONTENT=$(yq eval 'to_entries | .[] | .key + "=" + .value' "$ENV_FILE" | envsubst)
+          ENV_CONTENT=$(echo "${{ input.service_env }}" | yq eval 'to_entries | .[] | .key + "=" + .value')
           
           # Сохраняем в файл для использования в дальнейшем
           echo "$ENV_CONTENT" > /tmp/app_env_vars
           echo "ENV_CONTENT<<EOF" >> $GITHUB_OUTPUT
           echo "$ENV_CONTENT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
-        env:
-          secrets: ${{ toJson(secrets) }}
 
       # Настройка SSH для подключения к целевому серверу
       - name: Configure SSH
