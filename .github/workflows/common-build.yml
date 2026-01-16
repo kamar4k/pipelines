@@ -7,10 +7,10 @@ on:
         description: 'Ветка для сборки'
         required: true
         type: string
-      draft:
-        description: 'Предварительная сборка'
+      is_release:
+        description: 'Эта сборка - релизная'
         type: boolean
-        default: true
+        default: false
     secrets:
       GH_TOKEN:
         required: true
@@ -153,6 +153,7 @@ jobs:
 
       # Создание релиза
       - name: Create GitHub Release
+        if: ${{ inputs.is_release }}
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.VERSION }}
@@ -160,7 +161,7 @@ jobs:
           files: |
             build/libs/*.jar
           generate_release_notes: true
-          draft: ${{ inputs.draft }}
+          draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
