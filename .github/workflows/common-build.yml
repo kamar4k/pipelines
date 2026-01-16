@@ -124,6 +124,7 @@ jobs:
 
       # Сохранение JAR-файла как артефакт сборки
       - name: Upload artifact
+        if: ${{ inputs.is_release }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}-jar  # Имя артефакта для скачивания из UI
