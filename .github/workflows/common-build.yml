@@ -7,6 +7,10 @@ on:
         description: 'Ветка для сборки'
         required: true
         type: string
+      draft:
+        description: 'Предварительная сборка'
+        type: boolean
+        default: true
     secrets:
       GH_TOKEN:
         required: true
@@ -156,7 +160,7 @@ jobs:
           files: |
             build/libs/*.jar
           generate_release_notes: true
-          draft: false
+          draft: ${{ inputs.draft }}
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
